@@ -39,7 +39,10 @@ import {
 interface MapEditorProps {
   isAuthenticated: boolean
   onBackToHome: () => void
+  onBackToProjects?: () => void
   onConnectGitHub: () => void
+  initialProject?: any
+  userProfile?: any
 }
 
 interface MapCell {
@@ -67,7 +70,14 @@ const TILESETS = [
 const MAP_WIDTH = 30
 const MAP_HEIGHT = 20
 
-export default function MapEditor({ isAuthenticated, onBackToHome, onConnectGitHub }: MapEditorProps) {
+export default function MapEditor({
+  isAuthenticated,
+  onBackToHome,
+  onBackToProjects,
+  onConnectGitHub,
+  initialProject,
+  userProfile,
+}: MapEditorProps) {
   const [selectedTool, setSelectedTool] = useState("draw")
   const [selectedLayer, setSelectedLayer] = useState("base")
   const [zoom, setZoom] = useState([100])
@@ -83,6 +93,7 @@ export default function MapEditor({ isAuthenticated, onBackToHome, onConnectGitH
   const [showTilesets, setShowTilesets] = useState(false)
   const [showLayers, setShowLayers] = useState(false)
   const [showProperties, setShowProperties] = useState(false)
+  const [currentMapId, setCurrentMapId] = useState<string | null>(null)
 
   // Map data and history
   const [mapData, setMapData] = useState<MapCell[]>([])
@@ -133,6 +144,16 @@ export default function MapEditor({ isAuthenticated, onBackToHome, onConnectGitH
       initializeMap()
     }
   }, [])
+
+  // Initialize with project data if provided
+  useEffect(() => {
+    if (initialProject) {
+      setMapData(initialProject.map_data || [])
+      setMapName(initialProject.name || "My Map")
+      setCurrentMapId(initialProject.id || null)
+      setLastSaved(new Date(initialProject.updated_at || Date.now()))
+    }
+  }, [initialProject])
 
   const initializeMap = () => {
     const initialMap: MapCell[] = []
@@ -449,6 +470,11 @@ export default function MapEditor({ isAuthenticated, onBackToHome, onConnectGitH
         <Button size="sm" variant="ghost" onClick={onBackToHome}>
           <Home className="w-4 h-4" />
         </Button>
+        {onBackToProjects && (
+          <Button size="sm" variant="ghost" onClick={onBackToProjects}>
+            Projects
+          </Button>
+        )}
         <Input
           value={mapName}
           onChange={(e) => setMapName(e.target.value)}

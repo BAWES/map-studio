@@ -226,6 +226,15 @@ export default function LandingPage({
               </div>
 
               <div className="flex items-center gap-4">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-slate-400 hover:text-white border border-slate-700 hover:border-slate-600"
+                  onClick={() => window.open("https://github.com/BAWES/map-studio", "_blank")}
+                >
+                  <Github className="w-4 h-4 mr-2" />
+                  GitHub
+                </Button>
                 {isAuthenticated && userProfile ? (
                   <div className="flex items-center gap-2 text-sm text-slate-400">
                     <div className="w-2 h-2 bg-green-400 rounded-full"></div>
@@ -235,11 +244,10 @@ export default function LandingPage({
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-slate-400 hover:text-white border border-slate-700 hover:border-slate-600"
+                    className="text-slate-400 hover:text-white"
                     onClick={onConnectGitHub}
                   >
-                    <Github className="w-4 h-4 mr-2" />
-                    auth
+                    Sign In
                   </Button>
                 )}
               </div>
@@ -277,11 +285,11 @@ export default function LandingPage({
                 </Button>
                 <Button
                   variant="outline"
-                  onClick={onConnectGitHub}
+                  onClick={() => window.open("https://github.com/BAWES/map-studio", "_blank")}
                   className="border-slate-700 text-slate-300 hover:bg-slate-800 px-6 py-3"
                 >
                   <Github className="w-4 h-4 mr-2" />
-                  Connect GitHub
+                  View on GitHub
                 </Button>
               </div>
 
@@ -298,7 +306,7 @@ export default function LandingPage({
                   </div>
                   <div className="flex items-center gap-2 text-sm text-slate-400">
                     <Github className="w-4 h-4 text-slate-400" />
-                    Git integration
+                    Open source
                   </div>
                   <div className="flex items-center gap-2 text-sm text-slate-400">
                     <Gamepad2 className="w-4 h-4 text-green-400" />
@@ -445,6 +453,37 @@ export default function LandingPage({
             </div>
           </div>
         </div>
+        {/* Footer */}
+        <footer className="border-t border-slate-800 bg-slate-900/30 backdrop-blur">
+          <div className="container mx-auto px-6 py-8">
+            <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-6 h-6 bg-slate-800 border border-slate-700 rounded flex items-center justify-center">
+                  <Grid3X3 className="w-3 h-3 text-slate-300" />
+                </div>
+                <span className="text-sm font-mono text-slate-300">universe-map-studio</span>
+                <Badge variant="outline" className="text-xs border-slate-700 text-slate-500">
+                  Open Source
+                </Badge>
+              </div>
+              <div className="flex items-center gap-4 text-sm text-slate-400">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-slate-400 hover:text-white h-8"
+                  onClick={() => window.open("https://github.com/BAWES/map-studio", "_blank")}
+                >
+                  <Github className="w-4 h-4 mr-2" />
+                  Star on GitHub
+                </Button>
+                <span>•</span>
+                <span>Built with v0.dev</span>
+                <span>•</span>
+                <span>© 2024 BAWES</span>
+              </div>
+            </div>
+          </div>
+        </footer>
       </div>
     </div>
   )

@@ -1,40 +1,45 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useEffect, useRef, useState, useCallback } from "react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
-import { Slider } from "@/components/ui/slider"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import {
-  MousePointer2,
-  Paintbrush,
+  Download,
   Eraser,
-  Square,
-  Navigation,
-  Users,
-  Undo2,
-  Redo2,
-  ZoomIn,
-  ZoomOut,
-  Save,
-  Github,
-  Sparkles,
-  Grid3X3,
   Eye,
   EyeOff,
   Home,
-  Download,
-  Menu,
   Layers,
-  Palette,
-  X,
+  Navigation,
+  Paintbrush,
+  Redo2,
+  Shield,
+  Undo2,
+  Upload,
+  Users,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react"
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type PaintTool = "collision" | "spawn" | "exit" | "erase"
+
+interface TileCoord { x: number; y: number }
+
+interface MapState {
+  collisions: Set<string>
+  spawn: TileCoord | null
+  exits: Set<string>
+}
+
+interface LayerVis {
+  collision: boolean
+  spawn: boolean
+  exit: boolean
+  grid: boolean
+}
 
 interface MapEditorProps {
   isAuthenticated: boolean
@@ -45,390 +50,557 @@ interface MapEditorProps {
   userProfile?: any
 }
 
-interface MapCell {
-  x: number
-  y: number
-  tile: string
-  tileId: number
-  teleport?: boolean
-  spawn?: boolean
-  exitUrl?: string
-  collision?: boolean
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const TILE = 32
+const HISTORY_LIMIT = 50
+
+const TOOL_META: Record<PaintTool, { label: string; color: string; icon: any }> = {
+  collision: { label: "Collision",  color: "rgba(239,68,68,0.55)",   icon: Shield },
+  spawn:     { label: "Spawn",      color: "rgba(34,197,94,0.75)",   icon: Users },
+  exit:      { label: "Exit/Portal",color: "rgba(168,85,247,0.65)",  icon: Navigation },
+  erase:     { label: "Erase",      color: "transparent",            icon: Eraser },
 }
 
-interface HistoryState {
-  mapData: MapCell[]
-  timestamp: number
+const key = (x: number, y: number) => `${x},${y}`
+const fromKey = (k: string): TileCoord => {
+  const [x, y] = k.split(",").map(Number)
+  return { x, y }
 }
 
-const TILESETS = [
-  { name: "Grass", tiles: Array.from({ length: 16 }, (_, i) => ({ id: i, type: "grass", color: "bg-green-500" })) },
-  { name: "Stone", tiles: Array.from({ length: 12 }, (_, i) => ({ id: i + 16, type: "stone", color: "bg-gray-500" })) },
-  { name: "Water", tiles: Array.from({ length: 8 }, (_, i) => ({ id: i + 28, type: "water", color: "bg-blue-500" })) },
-]
+// ─── Export helper ────────────────────────────────────────────────────────────
 
-const MAP_WIDTH = 30
-const MAP_HEIGHT = 20
+function buildWAMap(
+  mapName: string,
+  cols: number,
+  rows: number,
+  collisions: Set<string>,
+  spawn: TileCoord | null,
+  exits: Set<string>,
+) {
+  const total = cols * rows
+  const makeEmpty = () => Array(total).fill(0)
+
+  // collision layer: tile id 443 = first Special_Zones collision tile (matches Universe starter)
+  const collisionData = makeEmpty()
+  collisions.forEach((k) => {
+    const { x, y } = fromKey(k)
+    collisionData[y * cols + x] = 443
+  })
+
+  // start layer: tile id 444 = spawn area tile
+  const startData = makeEmpty()
+  if (spawn) {
+    startData[spawn.y * cols + spawn.x] = 444
+    // mark surrounding 3×3 so the player always has room
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = spawn.x + dx
+        const ny = spawn.y + dy
+        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+          startData[ny * cols + nx] = 444
+        }
+      }
+    }
+  }
+
+  // floor layer: all tiles tile 201 (solid floor from tileset1)
+  const floorData = Array(total).fill(201)
+
+  // exits as object layer
+  const exitObjects = Array.from(exits).map((k, i) => {
+    const { x, y } = fromKey(k)
+    return {
+      class: "area",
+      height: TILE,
+      id: i + 100,
+      name: `exit_${i}`,
+      properties: [{ name: "exitUrl", type: "string", value: "" }],
+      rotation: 0,
+      visible: true,
+      width: TILE,
+      x: x * TILE,
+      y: y * TILE,
+    }
+  })
+
+  return {
+    compressionlevel: -1,
+    height: rows,
+    infinite: false,
+    layers: [
+      {
+        data: startData,
+        height: rows,
+        id: 6,
+        name: "start",
+        opacity: 1,
+        type: "tilelayer",
+        visible: true,
+        width: cols,
+        x: 0,
+        y: 0,
+      },
+      {
+        data: collisionData,
+        height: rows,
+        id: 7,
+        name: "collisions",
+        opacity: 1,
+        type: "tilelayer",
+        visible: true,
+        width: cols,
+        x: 0,
+        y: 0,
+      },
+      {
+        data: floorData,
+        height: rows,
+        id: 4,
+        name: "floor",
+        opacity: 1,
+        type: "tilelayer",
+        visible: true,
+        width: cols,
+        x: 0,
+        y: 0,
+      },
+      {
+        draworder: "topdown",
+        id: 2,
+        name: "floorLayer",
+        objects: exitObjects,
+        opacity: 1,
+        type: "objectgroup",
+        visible: true,
+        x: 0,
+        y: 0,
+      },
+    ],
+    nextlayerid: 40,
+    nextobjectid: exitObjects.length + 1,
+    orientation: "orthogonal",
+    properties: [
+      { name: "mapName", type: "string", value: mapName },
+    ],
+    renderorder: "right-down",
+    tiledversion: "1.9.2",
+    tileheight: TILE,
+    tilesets: [
+      {
+        columns: 11,
+        firstgid: 201,
+        image: "../assets/tileset1.png",
+        imageheight: 352,
+        imagewidth: 352,
+        margin: 0,
+        name: "tileset1",
+        spacing: 0,
+        tilecount: 121,
+        tileheight: TILE,
+        tilewidth: TILE,
+      },
+      {
+        columns: 6,
+        firstgid: 443,
+        image: "../assets/Special_Zones.png",
+        imageheight: 64,
+        imagewidth: 192,
+        margin: 0,
+        name: "Special_Zones",
+        spacing: 0,
+        tilecount: 12,
+        tileheight: TILE,
+        tiles: [{ id: 0, properties: [{ name: "collides", type: "bool", value: true }] }],
+        tilewidth: TILE,
+      },
+    ],
+    tilewidth: TILE,
+    type: "map",
+    version: "1.9",
+    width: cols,
+  }
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function MapEditor({
-  isAuthenticated,
   onBackToHome,
-  onBackToProjects,
-  onConnectGitHub,
-  initialProject,
-  userProfile,
 }: MapEditorProps) {
-  const [selectedTool, setSelectedTool] = useState("draw")
-  const [selectedLayer, setSelectedLayer] = useState("base")
-  const [zoom, setZoom] = useState([100])
-  const [selectedTile, setSelectedTile] = useState(0)
-  const [mapName, setMapName] = useState("My Map")
-  const [isDrawing, setIsDrawing] = useState(false)
-  const [selectedCell, setSelectedCell] = useState<MapCell | null>(null)
-  const [aiPrompt, setAiPrompt] = useState("")
-  const [showAiDialog, setShowAiDialog] = useState(false)
-  const [lastSaved, setLastSaved] = useState<Date>(new Date())
-  const [isMobile, setIsMobile] = useState(false)
-  const [showMobileMenu, setShowMobileMenu] = useState(false)
-  const [showTilesets, setShowTilesets] = useState(false)
-  const [showLayers, setShowLayers] = useState(false)
-  const [showProperties, setShowProperties] = useState(false)
-  const [currentMapId, setCurrentMapId] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const canvasRef    = useRef<HTMLCanvasElement>(null)
+  const bgImageRef   = useRef<HTMLImageElement | null>(null)
 
-  // Map data and history
-  const [mapData, setMapData] = useState<MapCell[]>([])
-  const [history, setHistory] = useState<HistoryState[]>([])
-  const [historyIndex, setHistoryIndex] = useState(-1)
+  // Map meta
+  const [mapName, setMapName]   = useState("My Map")
+  const [cols, setCols]         = useState(30)
+  const [rows, setRows]         = useState(20)
 
-  const canvasRef = useRef<HTMLDivElement>(null)
+  // Viewport
+  const [scale, setScale]   = useState(1)
+  const [offset, setOffset] = useState({ x: 0, y: 0 })
 
-  const tools = [
-    { id: "select", icon: MousePointer2, name: "Select", shortcut: "V" },
-    { id: "draw", icon: Paintbrush, name: "Paint", shortcut: "B" },
-    { id: "erase", icon: Eraser, name: "Erase", shortcut: "E" },
-    { id: "fill", icon: Square, name: "Fill", shortcut: "F" },
-    { id: "teleport", icon: Navigation, name: "Portal", shortcut: "T" },
-    { id: "spawn", icon: Users, name: "Spawn", shortcut: "S" },
-  ]
+  // Painting state
+  const [tool, setTool]             = useState<PaintTool>("collision")
+  const [isPainting, setIsPainting] = useState(false)
 
-  const layers = [
-    { id: "collision", name: "Collision", visible: true, locked: false, color: "bg-red-500" },
-    { id: "objects", name: "Objects", visible: true, locked: false, color: "bg-blue-500" },
-    { id: "base", name: "Base Layer", visible: true, locked: false, color: "bg-green-500" },
-  ]
+  // Map data
+  const [map, setMap] = useState<MapState>({
+    collisions: new Set(),
+    spawn: null,
+    exits: new Set(),
+  })
 
-  // Check if mobile
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768)
-    }
-    checkMobile()
-    window.addEventListener("resize", checkMobile)
-    return () => window.removeEventListener("resize", checkMobile)
+  // History
+  const historyRef   = useRef<MapState[]>([{ collisions: new Set(), spawn: null, exits: new Set() }])
+  const histIdxRef   = useRef(0)
+
+  // Layers visibility
+  const [layers, setLayers] = useState<LayerVis>({
+    collision: true,
+    spawn: true,
+    exit: true,
+    grid: true,
+  })
+
+  // Pan state
+  const panRef = useRef<{ active: boolean; lastX: number; lastY: number; startDist: number } | null>(null)
+
+  // ── Canvas dimensions ──────────────────────────────────────────────────────
+
+  const canvasW = cols * TILE
+  const canvasH = rows * TILE
+
+  // ── History helpers ────────────────────────────────────────────────────────
+
+  const cloneMap = (m: MapState): MapState => ({
+    collisions: new Set(m.collisions),
+    spawn: m.spawn ? { ...m.spawn } : null,
+    exits: new Set(m.exits),
+  })
+
+  const pushHistory = useCallback((newMap: MapState) => {
+    const hist = historyRef.current.slice(0, histIdxRef.current + 1)
+    hist.push(cloneMap(newMap))
+    if (hist.length > HISTORY_LIMIT) hist.shift()
+    historyRef.current = hist
+    histIdxRef.current = hist.length - 1
   }, [])
 
-  // Initialize map
-  useEffect(() => {
-    const savedMap = localStorage.getItem("universe-map-current")
-    if (savedMap) {
-      try {
-        const parsed = JSON.parse(savedMap)
-        setMapData(parsed.mapData || [])
-        setMapName(parsed.name || "My Map")
-        setLastSaved(new Date(parsed.lastSaved || Date.now()))
-      } catch (e) {
-        console.error("Failed to load saved map:", e)
-        initializeMap()
-      }
+  const undo = () => {
+    if (histIdxRef.current <= 0) return
+    histIdxRef.current--
+    setMap(cloneMap(historyRef.current[histIdxRef.current]))
+  }
+
+  const redo = () => {
+    if (histIdxRef.current >= historyRef.current.length - 1) return
+    histIdxRef.current++
+    setMap(cloneMap(historyRef.current[histIdxRef.current]))
+  }
+
+  // ── Draw ──────────────────────────────────────────────────────────────────
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    // Clear
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+    ctx.save()
+    ctx.translate(offset.x, offset.y)
+    ctx.scale(scale, scale)
+
+    // Background image
+    if (bgImageRef.current) {
+      ctx.drawImage(bgImageRef.current, 0, 0, canvasW, canvasH)
     } else {
-      initializeMap()
+      ctx.fillStyle = "#1e293b"
+      ctx.fillRect(0, 0, canvasW, canvasH)
     }
-  }, [])
 
-  // Initialize with project data if provided
-  useEffect(() => {
-    if (initialProject) {
-      setMapData(initialProject.map_data || [])
-      setMapName(initialProject.name || "My Map")
-      setCurrentMapId(initialProject.id || null)
-      setLastSaved(new Date(initialProject.updated_at || Date.now()))
-    }
-  }, [initialProject])
-
-  const initializeMap = () => {
-    const initialMap: MapCell[] = []
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      for (let x = 0; x < MAP_WIDTH; x++) {
-        const isWater = x > 10 && x < 15 && y > 8 && y < 12
-        const isStone = (x > 20 && y > 15) || (x < 5 && y < 5)
-        const hasTeleport = x === 7 && y === 7
-        const hasSpawn = x === 22 && y === 3
-
-        initialMap.push({
-          x,
-          y,
-          tile: isWater ? "water" : isStone ? "stone" : "grass",
-          tileId: isWater ? 28 : isStone ? 16 : 0,
-          teleport: hasTeleport,
-          spawn: hasSpawn,
-          collision: isStone,
-          exitUrl: hasTeleport ? "https://example.com/map2" : undefined,
-        })
-      }
-    }
-    setMapData(initialMap)
-    addToHistory(initialMap)
-  }
-
-  // History management
-  const addToHistory = useCallback(
-    (newMapData: MapCell[]) => {
-      const newState: HistoryState = {
-        mapData: JSON.parse(JSON.stringify(newMapData)),
-        timestamp: Date.now(),
-      }
-
-      setHistory((prev) => {
-        const newHistory = prev.slice(0, historyIndex + 1)
-        newHistory.push(newState)
-        return newHistory.slice(-50)
+    // Collision layer
+    if (layers.collision) {
+      ctx.fillStyle = TOOL_META.collision.color
+      map.collisions.forEach((k) => {
+        const { x, y } = fromKey(k)
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE)
       })
-      setHistoryIndex((prev) => Math.min(prev + 1, 49))
-    },
-    [historyIndex],
-  )
-
-  const undo = useCallback(() => {
-    if (historyIndex > 0) {
-      const newIndex = historyIndex - 1
-      setHistoryIndex(newIndex)
-      setMapData(JSON.parse(JSON.stringify(history[newIndex].mapData)))
     }
-  }, [history, historyIndex])
 
-  const redo = useCallback(() => {
-    if (historyIndex < history.length - 1) {
-      const newIndex = historyIndex + 1
-      setHistoryIndex(newIndex)
-      setMapData(JSON.parse(JSON.stringify(history[newIndex].mapData)))
+    // Exit layer
+    if (layers.exit) {
+      ctx.fillStyle = TOOL_META.exit.color
+      map.exits.forEach((k) => {
+        const { x, y } = fromKey(k)
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE)
+        // Portal symbol
+        ctx.fillStyle = "rgba(255,255,255,0.8)"
+        ctx.font = `${TILE * 0.5}px sans-serif`
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        ctx.fillText("⤴", x * TILE + TILE / 2, y * TILE + TILE / 2)
+        ctx.fillStyle = TOOL_META.exit.color
+      })
     }
-  }, [history, historyIndex])
 
-  // Save to localStorage
-  const saveMap = useCallback(() => {
-    const mapToSave = {
-      name: mapName,
-      mapData,
-      lastSaved: new Date().toISOString(),
-      width: MAP_WIDTH,
-      height: MAP_HEIGHT,
-    }
-    localStorage.setItem("universe-map-current", JSON.stringify(mapToSave))
-    setLastSaved(new Date())
-  }, [mapData, mapName])
-
-  // Auto-save every 30 seconds
-  useEffect(() => {
-    const interval = setInterval(saveMap, 30000)
-    return () => clearInterval(interval)
-  }, [saveMap])
-
-  // Get tile info
-  const getTileInfo = (tileId: number) => {
-    for (const tileset of TILESETS) {
-      const tile = tileset.tiles.find((t) => t.id === tileId)
-      if (tile) return tile
-    }
-    return TILESETS[0].tiles[0]
-  }
-
-  const getCellAt = (x: number, y: number) => {
-    return mapData.find((cell) => cell.x === x && cell.y === y)
-  }
-
-  const updateCell = useCallback((x: number, y: number, updates: Partial<MapCell>) => {
-    setMapData((prev) => {
-      const newData = [...prev]
-      const index = newData.findIndex((cell) => cell.x === x && cell.y === y)
-      if (index >= 0) {
-        newData[index] = { ...newData[index], ...updates }
-      }
-      return newData
-    })
-  }, [])
-
-  const handleCellInteraction = useCallback(
-    (x: number, y: number, isTouch = false) => {
-      const cell = getCellAt(x, y)
-      if (!cell) return
-
-      switch (selectedTool) {
-        case "select":
-          setSelectedCell(cell)
-          if (isMobile) setShowProperties(true)
-          break
-
-        case "draw":
-          const tileInfo = getTileInfo(selectedTile)
-          updateCell(x, y, {
-            tile: tileInfo.type,
-            tileId: selectedTile,
-            teleport: false,
-            spawn: false,
-          })
-          break
-
-        case "erase":
-          updateCell(x, y, {
-            tile: "grass",
-            tileId: 0,
-            teleport: false,
-            spawn: false,
-            collision: false,
-            exitUrl: undefined,
-          })
-          break
-
-        case "teleport":
-          updateCell(x, y, {
-            teleport: !cell.teleport,
-            spawn: false,
-            exitUrl: cell.teleport ? undefined : "https://example.com/map2",
-          })
-          break
-
-        case "spawn":
-          updateCell(x, y, {
-            spawn: !cell.spawn,
-            teleport: false,
-          })
-          break
-
-        case "fill":
-          const targetTile = cell.tileId
-          const newTileInfo = getTileInfo(selectedTile)
-          if (targetTile !== selectedTile) {
-            floodFill(x, y, targetTile, selectedTile, newTileInfo.type)
+    // Spawn layer
+    if (layers.spawn && map.spawn) {
+      const { x, y } = map.spawn
+      // Highlight 3×3 area
+      ctx.fillStyle = "rgba(34,197,94,0.2)"
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx; const ny = y + dy
+          if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+            ctx.fillRect(nx * TILE, ny * TILE, TILE, TILE)
           }
-          break
+        }
       }
-    },
-    [selectedTool, selectedTile, updateCell, isMobile],
-  )
-
-  const floodFill = (startX: number, startY: number, targetTile: number, newTile: number, newType: string) => {
-    const visited = new Set<string>()
-    const stack = [{ x: startX, y: startY }]
-
-    while (stack.length > 0) {
-      const { x, y } = stack.pop()!
-      const key = `${x},${y}`
-
-      if (visited.has(key) || x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue
-
-      const cell = getCellAt(x, y)
-      if (!cell || cell.tileId !== targetTile) continue
-
-      visited.add(key)
-      updateCell(x, y, { tile: newType, tileId: newTile })
-
-      stack.push({ x: x + 1, y }, { x: x - 1, y }, { x, y: y + 1 }, { x, y: y - 1 })
+      // Spawn pin
+      ctx.fillStyle = TOOL_META.spawn.color
+      ctx.fillRect(x * TILE, y * TILE, TILE, TILE)
+      ctx.fillStyle = "white"
+      ctx.font = `bold ${TILE * 0.55}px sans-serif`
+      ctx.textAlign = "center"
+      ctx.textBaseline = "middle"
+      ctx.fillText("★", x * TILE + TILE / 2, y * TILE + TILE / 2)
     }
-  }
 
-  // Touch and mouse handlers
-  const handlePointerDown = (x: number, y: number) => {
-    setIsDrawing(true)
-    handleCellInteraction(x, y, true)
-  }
-
-  const handlePointerMove = (x: number, y: number) => {
-    if (isDrawing && (selectedTool === "draw" || selectedTool === "erase")) {
-      handleCellInteraction(x, y, true)
-    }
-  }
-
-  const handlePointerUp = () => {
-    if (isDrawing) {
-      setIsDrawing(false)
-      addToHistory(mapData)
-    }
-  }
-
-  // AI Generation
-  const handleAiGenerate = async () => {
-    if (!aiPrompt.trim()) return
-
-    setShowAiDialog(false)
-    const newMapData = [...mapData]
-
-    const isForest = aiPrompt.toLowerCase().includes("forest")
-    const isCave = aiPrompt.toLowerCase().includes("cave")
-    const isWater = aiPrompt.toLowerCase().includes("water") || aiPrompt.toLowerCase().includes("lake")
-
-    for (let i = 0; i < newMapData.length; i++) {
-      const cell = newMapData[i]
-      const { x, y } = cell
-
-      if (isForest && Math.random() > 0.7) {
-        cell.tile = "grass"
-        cell.tileId = Math.floor(Math.random() * 16)
-      } else if (isCave && x > 5 && x < 25 && y > 5 && y < 15 && Math.random() > 0.8) {
-        cell.tile = "stone"
-        cell.tileId = 16 + Math.floor(Math.random() * 12)
-      } else if (isWater && x > 8 && x < 22 && y > 6 && y < 14 && Math.random() > 0.6) {
-        cell.tile = "water"
-        cell.tileId = 28 + Math.floor(Math.random() * 8)
+    // Grid
+    if (layers.grid) {
+      ctx.strokeStyle = "rgba(148,163,184,0.25)"
+      ctx.lineWidth = 0.5
+      for (let c = 0; c <= cols; c++) {
+        ctx.beginPath(); ctx.moveTo(c * TILE, 0); ctx.lineTo(c * TILE, canvasH); ctx.stroke()
+      }
+      for (let r = 0; r <= rows; r++) {
+        ctx.beginPath(); ctx.moveTo(0, r * TILE); ctx.lineTo(canvasW, r * TILE); ctx.stroke()
       }
     }
 
-    setMapData(newMapData)
-    addToHistory(newMapData)
-    setAiPrompt("")
+    ctx.restore()
+  }, [map, layers, scale, offset, canvasW, canvasH, cols, rows])
+
+  useEffect(() => { draw() }, [draw])
+
+  // Resize canvas to fill container
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      canvas.width  = el.clientWidth
+      canvas.height = el.clientHeight
+      draw()
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [draw])
+
+  // ── Pointer → tile ────────────────────────────────────────────────────────
+
+  const pointerToTile = (clientX: number, clientY: number): TileCoord | null => {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    const px = (clientX - rect.left - offset.x) / scale
+    const py = (clientY - rect.top  - offset.y) / scale
+    const tx = Math.floor(px / TILE)
+    const ty = Math.floor(py / TILE)
+    if (tx < 0 || tx >= cols || ty < 0 || ty >= rows) return null
+    return { x: tx, y: ty }
   }
 
-  // Export functionality
+  // ── Paint ─────────────────────────────────────────────────────────────────
+
+  const applyTool = useCallback((tx: number, ty: number) => {
+    setMap((prev) => {
+      const next = cloneMap(prev)
+      const k = key(tx, ty)
+      if (tool === "collision") {
+        next.collisions.add(k)
+        next.exits.delete(k)
+      } else if (tool === "exit") {
+        next.exits.add(k)
+        next.collisions.delete(k)
+      } else if (tool === "spawn") {
+        next.spawn = { x: tx, y: ty }
+      } else if (tool === "erase") {
+        next.collisions.delete(k)
+        next.exits.delete(k)
+        if (next.spawn && next.spawn.x === tx && next.spawn.y === ty) next.spawn = null
+      }
+      return next
+    })
+  }, [tool])
+
+  // ── Mouse events ──────────────────────────────────────────────────────────
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 1 || e.button === 2) {
+      // Middle/right = pan
+      panRef.current = { active: true, lastX: e.clientX, lastY: e.clientY, startDist: 0 }
+      return
+    }
+    const t = pointerToTile(e.clientX, e.clientY)
+    if (!t) return
+    setIsPainting(true)
+    applyTool(t.x, t.y)
+  }
+
+  const onMouseMove = (e: React.MouseEvent) => {
+    if (panRef.current?.active) {
+      setOffset((o) => ({ x: o.x + e.movementX, y: o.y + e.movementY }))
+      return
+    }
+    if (!isPainting) return
+    const t = pointerToTile(e.clientX, e.clientY)
+    if (t) applyTool(t.x, t.y)
+  }
+
+  const onMouseUp = (e: React.MouseEvent) => {
+    if (panRef.current?.active) { panRef.current = null; return }
+    if (isPainting) {
+      setIsPainting(false)
+      setMap((m) => { pushHistory(m); return m })
+    }
+  }
+
+  const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault()
+    const factor = e.deltaY < 0 ? 1.1 : 0.9
+    const canvas = canvasRef.current!
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    setScale((s) => {
+      const next = Math.min(4, Math.max(0.2, s * factor))
+      const ratio = next / s
+      setOffset((o) => ({
+        x: mx - ratio * (mx - o.x),
+        y: my - ratio * (my - o.y),
+      }))
+      return next
+    })
+  }
+
+  // ── Touch events ──────────────────────────────────────────────────────────
+
+  const touchPaintRef = useRef(false)
+  const lastTouchRef  = useRef<{ x: number; y: number } | null>(null)
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    e.preventDefault()
+    if (e.touches.length === 2) {
+      // Pinch start
+      const dx = e.touches[1].clientX - e.touches[0].clientX
+      const dy = e.touches[1].clientY - e.touches[0].clientY
+      panRef.current = {
+        active: true,
+        lastX: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+        lastY: (e.touches[0].clientY + e.touches[1].clientY) / 2,
+        startDist: Math.hypot(dx, dy),
+      }
+      return
+    }
+    // Single touch = paint
+    const touch = e.touches[0]
+    const t = pointerToTile(touch.clientX, touch.clientY)
+    if (!t) return
+    touchPaintRef.current = true
+    lastTouchRef.current = { x: touch.clientX, y: touch.clientY }
+    applyTool(t.x, t.y)
+  }
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    e.preventDefault()
+    if (e.touches.length === 2 && panRef.current) {
+      const dx = e.touches[1].clientX - e.touches[0].clientX
+      const dy = e.touches[1].clientY - e.touches[0].clientY
+      const dist = Math.hypot(dx, dy)
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2
+      const scaleFactor = dist / panRef.current.startDist
+
+      setScale((s) => {
+        const next = Math.min(4, Math.max(0.2, s * scaleFactor))
+        const ratio = next / s
+        const canvas = canvasRef.current!
+        const rect = canvas.getBoundingClientRect()
+        const mx = midX - rect.left
+        const my = midY - rect.top
+        setOffset((o) => ({
+          x: mx - ratio * (mx - o.x) + (midX - panRef.current!.lastX),
+          y: my - ratio * (my - o.y) + (midY - panRef.current!.lastY),
+        }))
+        return next
+      })
+
+      panRef.current.lastX = midX
+      panRef.current.lastY = midY
+      panRef.current.startDist = dist
+      return
+    }
+
+    if (!touchPaintRef.current) return
+    const touch = e.touches[0]
+    const t = pointerToTile(touch.clientX, touch.clientY)
+    if (t) applyTool(t.x, t.y)
+  }
+
+  const onTouchEnd = (e: React.TouchEvent) => {
+    panRef.current = null
+    if (touchPaintRef.current) {
+      touchPaintRef.current = false
+      setMap((m) => { pushHistory(m); return m })
+    }
+  }
+
+  // ── Image upload ──────────────────────────────────────────────────────────
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      bgImageRef.current = img
+      // Auto-set cols/rows based on image aspect at 32px tiles
+      const naturalCols = Math.round(img.naturalWidth  / TILE)
+      const naturalRows = Math.round(img.naturalHeight / TILE)
+      setCols(Math.max(10, Math.min(200, naturalCols)))
+      setRows(Math.max(10, Math.min(200, naturalRows)))
+      // Reset map
+      const fresh: MapState = { collisions: new Set(), spawn: null, exits: new Set() }
+      setMap(fresh)
+      historyRef.current = [cloneMap(fresh)]
+      histIdxRef.current = 0
+      // Fit to viewport
+      const canvas = canvasRef.current!
+      const fitScale = Math.min(
+        canvas.width  / (naturalCols * TILE),
+        canvas.height / (naturalRows * TILE),
+        1,
+      )
+      setScale(fitScale)
+      setOffset({ x: 0, y: 0 })
+    }
+    img.src = url
+  }
+
+  // ── Export ────────────────────────────────────────────────────────────────
+
   const exportMap = () => {
-    const exportData = {
-      name: mapName,
-      width: MAP_WIDTH,
-      height: MAP_HEIGHT,
-      tilewidth: 32,
-      tileheight: 32,
-      layers: [
-        {
-          name: "base",
-          type: "tilelayer",
-          data: mapData.map((cell) => cell.tileId + 1),
-        },
-      ],
-      tilesets: [
-        {
-          firstgid: 1,
-          name: "tileset",
-          tilewidth: 32,
-          tileheight: 32,
-          tilecount: 36,
-          columns: 6,
-        },
-      ],
-      objects: mapData
-        .filter((cell) => cell.teleport || cell.spawn)
-        .map((cell) => ({
-          id: cell.x * MAP_HEIGHT + cell.y,
-          x: cell.x * 32,
-          y: cell.y * 32,
-          width: 32,
-          height: 32,
-          type: cell.teleport ? "teleport" : "spawn",
-          properties: cell.exitUrl ? { exitUrl: cell.exitUrl } : {},
-        })),
-    }
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
+    const data = buildWAMap(mapName, cols, rows, map.collisions, map.spawn, map.exits)
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement("a")
+    a.href     = url
     a.download = `${mapName.replace(/\s+/g, "_").toLowerCase()}.tmj`
     document.body.appendChild(a)
     a.click()
@@ -436,707 +608,303 @@ export default function MapEditor({
     URL.revokeObjectURL(url)
   }
 
-  const getTileColor = (cell: MapCell) => {
-    if (cell.teleport) return "bg-purple-500"
-    if (cell.spawn) return "bg-yellow-500"
-    const tileInfo = getTileInfo(cell.tileId)
-    return tileInfo.color
+  // ── Zoom helpers ──────────────────────────────────────────────────────────
+
+  const zoom = (dir: 1 | -1) => {
+    const next = Math.min(4, Math.max(0.2, scale + dir * 0.2))
+    setScale(next)
   }
 
-  // Mobile tool selector
-  const MobileToolSelector = () => (
-    <div className="flex gap-2 p-3 bg-slate-900 border-t border-slate-800 overflow-x-auto">
-      {tools.map((tool) => (
-        <Button
-          key={tool.id}
-          size="sm"
-          variant={selectedTool === tool.id ? "default" : "ghost"}
-          className={`min-w-[60px] h-12 flex-col gap-1 ${
-            selectedTool === tool.id ? "bg-purple-600 hover:bg-purple-700" : "hover:bg-slate-800"
-          }`}
-          onClick={() => setSelectedTool(tool.id)}
-        >
-          <tool.icon className="w-4 h-4" />
-          <span className="text-xs">{tool.name}</span>
-        </Button>
-      ))}
-    </div>
-  )
+  const fitToScreen = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const s = Math.min(canvas.width / canvasW, canvas.height / canvasH, 1)
+    setScale(s)
+    setOffset({ x: 0, y: 0 })
+  }
 
-  // Mobile header
-  const MobileHeader = () => (
-    <div className="bg-slate-900 border-b border-slate-800 p-3 flex items-center justify-between">
-      <div className="flex items-center gap-3">
-        <Button size="sm" variant="ghost" onClick={onBackToHome}>
+  // ── Stats ─────────────────────────────────────────────────────────────────
+
+  const collisionCount = map.collisions.size
+  const exitCount      = map.exits.size
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  const tools: PaintTool[] = ["collision", "spawn", "exit", "erase"]
+
+  return (
+    <div className="h-screen bg-slate-950 text-white flex flex-col select-none overflow-hidden">
+
+      {/* ── Top Bar ───────────────────────────────────────────────────────── */}
+      <div className="bg-slate-900 border-b border-slate-800 px-3 py-2 flex items-center gap-2 flex-wrap">
+
+        <Button size="sm" variant="ghost" onClick={onBackToHome} className="h-8 px-2">
           <Home className="w-4 h-4" />
         </Button>
-        {onBackToProjects && (
-          <Button size="sm" variant="ghost" onClick={onBackToProjects}>
-            Projects
-          </Button>
-        )}
+
+        <div className="h-5 w-px bg-slate-700" />
+
+        {/* Map name */}
         <Input
           value={mapName}
           onChange={(e) => setMapName(e.target.value)}
-          className="bg-slate-800 border-slate-700 text-white text-sm h-8 flex-1 max-w-[150px]"
+          className="bg-slate-800 border-slate-700 text-white h-8 w-36 text-sm"
         />
-      </div>
 
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="ghost" onClick={undo} disabled={historyIndex <= 0}>
+        <div className="h-5 w-px bg-slate-700" />
+
+        {/* Undo / Redo */}
+        <Button size="sm" variant="ghost" onClick={undo} className="h-8 w-8 p-0">
           <Undo2 className="w-4 h-4" />
         </Button>
-        <Button size="sm" variant="ghost" onClick={redo} disabled={historyIndex >= history.length - 1}>
+        <Button size="sm" variant="ghost" onClick={redo} className="h-8 w-8 p-0">
           <Redo2 className="w-4 h-4" />
         </Button>
 
-        <Sheet open={showMobileMenu} onOpenChange={setShowMobileMenu}>
-          <SheetTrigger asChild>
-            <Button size="sm" variant="ghost">
-              <Menu className="w-4 h-4" />
-            </Button>
-          </SheetTrigger>
-          <SheetContent side="right" className="bg-slate-900 border-slate-800 text-white w-80">
-            <SheetHeader>
-              <SheetTitle className="text-white">Menu</SheetTitle>
-            </SheetHeader>
-            <div className="space-y-4 mt-6">
-              <Button onClick={() => setShowAiDialog(true)} className="w-full bg-purple-600 hover:bg-purple-700">
-                <Sparkles className="w-4 h-4 mr-2" />
-                AI Generate
-              </Button>
+        <div className="h-5 w-px bg-slate-700" />
 
-              <div className="space-y-2">
-                <Button onClick={saveMap} variant="outline" className="w-full">
-                  <Save className="w-4 h-4 mr-2" />
-                  Save Project
-                </Button>
-                <Button onClick={exportMap} variant="outline" className="w-full">
-                  <Download className="w-4 h-4 mr-2" />
-                  Export Map
-                </Button>
-              </div>
-
-              {isAuthenticated ? (
-                <Button className="w-full bg-green-600 hover:bg-green-700">
-                  <Github className="w-4 h-4 mr-2" />
-                  Sync to GitHub
-                </Button>
-              ) : (
-                <Button onClick={onConnectGitHub} variant="outline" className="w-full">
-                  <Github className="w-4 h-4 mr-2" />
-                  Connect GitHub
-                </Button>
-              )}
-
-              <div className="pt-4 border-t border-slate-700">
-                <div className="text-xs text-slate-400 space-y-1">
-                  <div>Last saved: {lastSaved.toLocaleTimeString()}</div>
-                  <div>Status: {isAuthenticated ? "Synced with GitHub" : "Saved on your device"}</div>
-                </div>
-              </div>
-            </div>
-          </SheetContent>
-        </Sheet>
-      </div>
-    </div>
-  )
-
-  // Desktop header
-  const DesktopHeader = () => (
-    <div className="bg-slate-900 border-b border-slate-800 p-3 flex items-center justify-between">
-      <div className="flex items-center gap-4">
-        <Button size="sm" variant="ghost" className="h-8" onClick={onBackToHome}>
-          <Home className="w-4 h-4 mr-2" />
-          Home
+        {/* Zoom */}
+        <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={() => zoom(-1)}>
+          <ZoomOut className="w-4 h-4" />
+        </Button>
+        <span className="text-xs text-slate-400 w-10 text-center">{Math.round(scale * 100)}%</span>
+        <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={() => zoom(1)}>
+          <ZoomIn className="w-4 h-4" />
+        </Button>
+        <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={fitToScreen}>
+          Fit
         </Button>
 
-        <Separator orientation="vertical" className="h-6 bg-slate-700" />
+        <div className="h-5 w-px bg-slate-700" />
 
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 bg-gradient-to-br from-purple-500 to-blue-500 rounded flex items-center justify-center">
-            <Grid3X3 className="w-3 h-3 text-white" />
-          </div>
-          <Input
-            value={mapName}
-            onChange={(e) => setMapName(e.target.value)}
-            className="bg-slate-800 border-slate-700 text-white w-48 h-8"
-          />
-        </div>
+        {/* Upload image */}
+        <Label
+          htmlFor="bg-upload"
+          className="cursor-pointer flex items-center gap-1.5 h-8 px-3 rounded-md bg-slate-700 hover:bg-slate-600 text-sm"
+        >
+          <Upload className="w-4 h-4" />
+          Upload Map
+        </Label>
+        <input
+          id="bg-upload"
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleImageUpload}
+        />
 
-        <Separator orientation="vertical" className="h-6 bg-slate-700" />
-
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={undo} disabled={historyIndex <= 0}>
-            <Undo2 className="w-4 h-4" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-8 w-8 p-0"
-            onClick={redo}
-            disabled={historyIndex >= history.length - 1}
-          >
-            <Redo2 className="w-4 h-4" />
-          </Button>
-        </div>
-
-        <Separator orientation="vertical" className="h-6 bg-slate-700" />
-
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-8 w-8 p-0"
-            onClick={() => setZoom([Math.max(25, zoom[0] - 25)])}
-          >
-            <ZoomOut className="w-4 h-4" />
-          </Button>
-          <span className="text-sm text-slate-300 w-12 text-center">{zoom[0]}%</span>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-8 w-8 p-0"
-            onClick={() => setZoom([Math.min(200, zoom[0] + 25)])}
-          >
-            <ZoomIn className="w-4 h-4" />
-          </Button>
-        </div>
+        {/* Export */}
+        <Button
+          size="sm"
+          className="h-8 px-3 bg-emerald-600 hover:bg-emerald-700 ml-auto"
+          onClick={exportMap}
+        >
+          <Download className="w-4 h-4 mr-1.5" />
+          Export .tmj
+        </Button>
       </div>
 
-      <div className="flex items-center gap-3">
-        <Button size="sm" className="bg-purple-600 hover:bg-purple-700 h-8" onClick={() => setShowAiDialog(true)}>
-          <Sparkles className="w-4 h-4 mr-2" />
-          AI Generate
-        </Button>
-
-        <Separator orientation="vertical" className="h-6 bg-slate-700" />
-
-        <Button size="sm" variant="ghost" className="h-8" onClick={saveMap}>
-          <Save className="w-4 h-4 mr-2" />
-          Save
-        </Button>
-
-        <Button size="sm" variant="ghost" className="h-8" onClick={exportMap}>
-          <Download className="w-4 h-4 mr-2" />
-          Export
-        </Button>
-
-        {isAuthenticated ? (
-          <Button size="sm" className="bg-green-600 hover:bg-green-700 h-8">
-            <Github className="w-4 h-4 mr-2" />
-            Sync to GitHub
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            variant="outline"
-            className="border-slate-700 text-white hover:bg-slate-800 h-8"
-            onClick={onConnectGitHub}
-          >
-            <Github className="w-4 h-4 mr-2" />
-            Connect GitHub
-          </Button>
-        )}
-
-        <div className="flex items-center gap-2 ml-4">
-          {isAuthenticated ? (
-            <Badge variant="secondary" className="bg-green-500/20 text-green-300">
-              <div className="w-2 h-2 bg-green-400 rounded-full mr-1" />
-              Synced
-            </Badge>
-          ) : (
-            <Badge variant="secondary" className="bg-blue-500/20 text-blue-300">
-              <div className="w-2 h-2 bg-blue-400 rounded-full mr-1" />
-              Saved on Device
-            </Badge>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-
-  return (
-    <div className="h-screen bg-slate-950 text-white flex flex-col overflow-hidden">
-      {/* Header */}
-      {isMobile ? <MobileHeader /> : <DesktopHeader />}
-
+      {/* ── Main Area ─────────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Desktop Left Sidebar - Tools */}
-        {!isMobile && (
-          <div className="w-16 bg-slate-900 border-r border-slate-800 p-2 flex flex-col gap-2">
-            {tools.map((tool) => (
-              <Button
-                key={tool.id}
-                size="sm"
-                variant={selectedTool === tool.id ? "default" : "ghost"}
-                className={`w-12 h-12 p-0 ${
-                  selectedTool === tool.id ? "bg-purple-600 hover:bg-purple-700" : "hover:bg-slate-800"
-                }`}
-                onClick={() => setSelectedTool(tool.id)}
-                title={`${tool.name} (${tool.shortcut})`}
+
+        {/* ── Left Toolbar ──────────────────────────────────────────────── */}
+        <div className="w-14 bg-slate-900 border-r border-slate-800 flex flex-col items-center py-3 gap-2">
+          {tools.map((t) => {
+            const meta = TOOL_META[t]
+            const Icon = meta.icon
+            const active = tool === t
+            return (
+              <button
+                key={t}
+                title={meta.label}
+                onClick={() => setTool(t)}
+                className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors
+                  ${ active
+                    ? "ring-2 ring-white bg-slate-700"
+                    : "hover:bg-slate-800 text-slate-400 hover:text-white"
+                  }`}
+                style={active ? { color: meta.color === "transparent" ? "white" : meta.color } : {}}
               >
-                <tool.icon className="w-5 h-5" />
-              </Button>
+                <Icon className="w-5 h-5" />
+              </button>
+            )
+          })}
+
+          <div className="flex-1" />
+
+          {/* Layer toggles */}
+          <div className="flex flex-col items-center gap-1 pb-2">
+            <span className="text-slate-500 text-[9px] uppercase tracking-wider mb-1">Layers</span>
+            {([
+              { id: "grid",      color: "text-slate-400", label: "Grid" },
+              { id: "collision", color: "text-red-400",   label: "Collisions" },
+              { id: "spawn",     color: "text-green-400", label: "Spawn" },
+              { id: "exit",      color: "text-purple-400",label: "Exits" },
+            ] as { id: keyof LayerVis; color: string; label: string }[]).map((l) => (
+              <button
+                key={l.id}
+                title={`Toggle ${l.label}`}
+                onClick={() => setLayers((lv) => ({ ...lv, [l.id]: !lv[l.id] }))}
+                className={`w-10 h-8 rounded flex items-center justify-center transition-colors ${
+                  layers[l.id] ? l.color : "text-slate-600"
+                } hover:bg-slate-800`}
+              >
+                {layers[l.id]
+                  ? <Eye className="w-4 h-4" />
+                  : <EyeOff className="w-4 h-4" />}
+              </button>
             ))}
           </div>
-        )}
-
-        {/* Main Canvas Area */}
-        <div className="flex-1 bg-slate-950 relative overflow-auto">
-          <div className="absolute inset-0 p-2 md:p-8">
-            <div className="relative bg-slate-900 rounded-lg border border-slate-800 overflow-hidden shadow-2xl h-full">
-              {/* Canvas Header */}
-              <div className="bg-slate-800 border-b border-slate-700 p-2 md:p-3 flex items-center justify-between">
-                <div className="flex items-center gap-2 md:gap-3">
-                  <span className="text-xs md:text-sm text-slate-300">
-                    {MAP_WIDTH}×{MAP_HEIGHT}
-                  </span>
-                  <Badge variant="secondary" className="text-xs">
-                    {selectedLayer}
-                  </Badge>
-                  {isMobile && (
-                    <div className="flex gap-1">
-                      <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setShowTilesets(true)}>
-                        <Palette className="w-3 h-3 mr-1" />
-                        Tiles
-                      </Button>
-                      <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setShowLayers(true)}>
-                        <Layers className="w-3 h-3 mr-1" />
-                        Layers
-                      </Button>
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  {!isMobile && (
-                    <>
-                      <Button size="sm" variant="ghost" className="h-7 text-xs">
-                        <Grid3X3 className="w-3 h-3 mr-1" />
-                        Grid
-                      </Button>
-                      <Slider value={zoom} onValueChange={setZoom} max={200} min={25} step={25} className="w-20" />
-                    </>
-                  )}
-                  {isMobile && (
-                    <div className="flex gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 w-7 p-0"
-                        onClick={() => setZoom([Math.max(25, zoom[0] - 25)])}
-                      >
-                        <ZoomOut className="w-3 h-3" />
-                      </Button>
-                      <span className="text-xs text-slate-300 px-2 py-1">{zoom[0]}%</span>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 w-7 p-0"
-                        onClick={() => setZoom([Math.min(200, zoom[0] + 25)])}
-                      >
-                        <ZoomIn className="w-3 h-3" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Canvas Grid */}
-              <div className="p-2 md:p-4 bg-slate-950 h-full overflow-auto" onPointerUp={handlePointerUp}>
-                <div
-                  ref={canvasRef}
-                  className="grid gap-0 border border-slate-700 rounded overflow-hidden select-none mx-auto"
-                  style={{
-                    gridTemplateColumns: `repeat(${MAP_WIDTH}, 1fr)`,
-                    aspectRatio: `${MAP_WIDTH}/${MAP_HEIGHT}`,
-                    transform: `scale(${zoom[0] / 100})`,
-                    transformOrigin: "center",
-                    maxWidth: isMobile ? "100%" : "none",
-                    width: isMobile ? "100%" : "auto",
-                  }}
-                >
-                  {mapData.map((cell, index) => (
-                    <div
-                      key={index}
-                      className={`
-                        aspect-square border border-slate-800/50 relative cursor-pointer transition-all
-                        ${!isMobile ? "hover:border-purple-400/50 hover:scale-110 hover:z-10" : ""}
-                        ${getTileColor(cell)}
-                        ${selectedCell?.x === cell.x && selectedCell?.y === cell.y ? "ring-2 ring-purple-400" : ""}
-                      `}
-                      style={{
-                        minWidth: isMobile ? "12px" : "16px",
-                        minHeight: isMobile ? "12px" : "16px",
-                        touchAction: "none",
-                      }}
-                      onPointerDown={() => handlePointerDown(cell.x, cell.y)}
-                      onPointerEnter={() => handlePointerMove(cell.x, cell.y)}
-                      onTouchStart={(e) => {
-                        e.preventDefault()
-                        handlePointerDown(cell.x, cell.y)
-                      }}
-                    >
-                      {cell.teleport && (
-                        <Navigation className="w-2 h-2 md:w-3 md:h-3 text-white absolute inset-0 m-auto" />
-                      )}
-                      {cell.spawn && <Users className="w-2 h-2 md:w-3 md:h-3 text-white absolute inset-0 m-auto" />}
-                      {cell.collision && <div className="absolute inset-0 bg-red-500/20 border border-red-500/50" />}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
 
-        {/* Desktop Right Sidebar */}
-        {!isMobile && (
-          <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col">
-            {/* Tileset Browser */}
-            <div className="border-b border-slate-800">
-              <div className="p-4">
-                <h3 className="text-sm font-medium text-slate-200 mb-3">Tileset Browser</h3>
-                <div className="space-y-3">
-                  {TILESETS.map((tileset) => (
-                    <div key={tileset.name}>
-                      <h4 className="text-xs text-slate-400 mb-2">{tileset.name}</h4>
-                      <div className="grid grid-cols-8 gap-1">
-                        {tileset.tiles.map((tile) => (
-                          <div
-                            key={tile.id}
-                            className={`
-                              aspect-square rounded border cursor-pointer transition-all hover:scale-110
-                              ${
-                                selectedTile === tile.id
-                                  ? "border-purple-400 bg-purple-500/20 ring-2 ring-purple-400"
-                                  : "border-slate-700 hover:border-slate-600"
-                              }
-                              ${tile.color}
-                            `}
-                            onClick={() => setSelectedTile(tile.id)}
-                            title={`${tile.type} (${tile.id})`}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+        {/* ── Canvas ───────────────────────────────────────────────────── */}
+        <div
+          ref={containerRef}
+          className="flex-1 overflow-hidden bg-slate-950 relative"
+        >
+          <canvas
+            ref={canvasRef}
+            className="absolute inset-0 touch-none"
+            style={{ cursor: tool === "erase" ? "cell" : "crosshair" }}
+            onMouseDown={onMouseDown}
+            onMouseMove={onMouseMove}
+            onMouseUp={onMouseUp}
+            onMouseLeave={onMouseUp}
+            onWheel={onWheel}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+            onContextMenu={(e) => e.preventDefault()}
+          />
+
+          {/* Empty state hint */}
+          {!bgImageRef.current && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+              <div className="text-center space-y-3 opacity-40">
+                <Upload className="w-12 h-12 mx-auto" />
+                <p className="text-lg font-medium">Upload your AI-generated map image</p>
+                <p className="text-sm text-slate-400">PNG/JPG · Grid auto-fits to 32px tiles · Paint collision &amp; spawn on top</p>
               </div>
             </div>
+          )}
+        </div>
 
-            {/* Layers Panel */}
-            <div className="border-b border-slate-800">
-              <div className="p-4">
-                <h3 className="text-sm font-medium text-slate-200 mb-3">Layers</h3>
-                <div className="space-y-2">
-                  {layers.map((layer) => (
-                    <div
-                      key={layer.id}
-                      className={`
-                        flex items-center gap-3 p-2 rounded cursor-pointer transition-colors
-                        ${
-                          selectedLayer === layer.id
-                            ? "bg-purple-500/20 border border-purple-500/30"
-                            : "hover:bg-slate-800"
-                        }
-                      `}
-                      onClick={() => setSelectedLayer(layer.id)}
-                    >
-                      <div className={`w-3 h-3 rounded ${layer.color}`} />
-                      <span className="text-sm flex-1">{layer.name}</span>
-                      <Button size="sm" variant="ghost" className="h-5 w-5 p-0">
-                        {layer.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </div>
+        {/* ── Right Panel ──────────────────────────────────────────────── */}
+        <div className="w-52 bg-slate-900 border-l border-slate-800 flex flex-col p-3 gap-4 overflow-y-auto">
+
+          {/* Active tool */}
+          <div>
+            <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Active Tool</p>
+            <div
+              className="rounded-lg p-3 text-sm font-medium flex items-center gap-2"
+              style={{
+                background: tool === "erase" ? "#334155" : TOOL_META[tool].color.replace("0.55","0.15").replace("0.75","0.15").replace("0.65","0.15"),
+                borderLeft: `3px solid ${tool === "erase" ? "#64748b" : TOOL_META[tool].color}`,
+              }}
+            >
+              {(() => { const Icon = TOOL_META[tool].icon; return <Icon className="w-4 h-4" /> })()}
+              {TOOL_META[tool].label}
             </div>
+          </div>
 
-            {/* Properties Panel */}
-            <div className="flex-1 overflow-auto">
-              <div className="p-4">
-                <h3 className="text-sm font-medium text-slate-200 mb-3">Properties</h3>
-                {selectedCell ? (
-                  <Card className="bg-slate-800 border-slate-700">
-                    <CardContent className="p-3">
-                      <div className="space-y-3">
-                        <div>
-                          <Label className="text-xs text-slate-400">Position</Label>
-                          <Input
-                            value={`${selectedCell.x}, ${selectedCell.y}`}
-                            className="bg-slate-900 border-slate-700 text-white h-7 text-xs mt-1"
-                            readOnly
-                          />
-                        </div>
-
-                        <div>
-                          <Label className="text-xs text-slate-400">Tile</Label>
-                          <Input
-                            value={`${selectedCell.tile}_${selectedCell.tileId}`}
-                            className="bg-slate-900 border-slate-700 text-white h-7 text-xs mt-1"
-                            readOnly
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs text-slate-400">Collision</Label>
-                          <Switch
-                            checked={selectedCell.collision || false}
-                            onCheckedChange={(checked) =>
-                              updateCell(selectedCell.x, selectedCell.y, { collision: checked })
-                            }
-                          />
-                        </div>
-
-                        {selectedCell.teleport && (
-                          <div>
-                            <Label className="text-xs text-slate-400">Exit URL</Label>
-                            <Input
-                              value={selectedCell.exitUrl || ""}
-                              onChange={(e) => updateCell(selectedCell.x, selectedCell.y, { exitUrl: e.target.value })}
-                              placeholder="https://example.com/map2"
-                              className="bg-slate-900 border-slate-700 text-white h-7 text-xs mt-1"
-                            />
-                          </div>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ) : (
-                  <div className="text-center text-slate-400 text-sm py-8">Select a tile to view properties</div>
-                )}
-
-                {!isAuthenticated && (
-                  <Card className="bg-orange-500/10 border-orange-500/20 mt-4">
-                    <CardContent className="p-3">
-                      <div className="text-center">
-                        <h4 className="text-sm font-medium text-orange-300 mb-2">Connect GitHub</h4>
-                        <p className="text-xs text-orange-200/80 mb-3">Sync projects and collaborate with your team</p>
-                        <Button
-                          size="sm"
-                          className="w-full bg-orange-600 hover:bg-orange-700"
-                          onClick={onConnectGitHub}
-                        >
-                          <Github className="w-3 h-3 mr-1" />
-                          Connect Now
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
+          {/* Stats */}
+          <div>
+            <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Stats</p>
+            <div className="space-y-1.5 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Size</span>
+                <span className="text-slate-200 font-mono">{cols}×{rows}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Collisions</span>
+                <span className="text-red-400 font-mono">{collisionCount}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Spawn</span>
+                <span className={map.spawn ? "text-green-400" : "text-slate-600"}>
+                  {map.spawn ? `${map.spawn.x},${map.spawn.y}` : "none"}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Exits</span>
+                <span className="text-purple-400 font-mono">{exitCount}</span>
               </div>
             </div>
           </div>
-        )}
+
+          {/* Grid size */}
+          <div>
+            <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Grid Size</p>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label className="text-xs text-slate-400">Cols</Label>
+                <Input
+                  type="number"
+                  value={cols}
+                  min={10}
+                  max={200}
+                  onChange={(e) => setCols(parseInt(e.target.value) || 30)}
+                  className="bg-slate-800 border-slate-700 text-white h-8 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <Label className="text-xs text-slate-400">Rows</Label>
+                <Input
+                  type="number"
+                  value={rows}
+                  min={10}
+                  max={200}
+                  onChange={(e) => setRows(parseInt(e.target.value) || 20)}
+                  className="bg-slate-800 border-slate-700 text-white h-8 text-sm mt-1"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Legend */}
+          <div>
+            <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Legend</p>
+            <div className="space-y-1.5">
+              {(Object.entries(TOOL_META) as [PaintTool, typeof TOOL_META[PaintTool]][]).map(([t, m]) => (
+                <div key={t} className="flex items-center gap-2 text-xs text-slate-300">
+                  <div
+                    className="w-4 h-4 rounded border border-slate-600"
+                    style={{ background: m.color === "transparent" ? "#334155" : m.color }}
+                  />
+                  {m.label}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Tips */}
+          <div className="mt-auto">
+            <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Tips</p>
+            <ul className="text-xs text-slate-500 space-y-1 leading-relaxed">
+              <li>🖱 Drag to paint</li>
+              <li>🤏 Pinch to zoom</li>
+              <li>✋ Right-drag to pan</li>
+              <li>⭐ Only one spawn</li>
+              <li>📤 Export → drop in WA</li>
+            </ul>
+          </div>
+        </div>
       </div>
 
-      {/* Mobile Tool Selector */}
-      {isMobile && <MobileToolSelector />}
-
-      {/* Mobile Sheets */}
-      {isMobile && (
-        <>
-          {/* Tileset Sheet */}
-          <Sheet open={showTilesets} onOpenChange={setShowTilesets}>
-            <SheetContent side="bottom" className="bg-slate-900 border-slate-800 text-white h-[60vh]">
-              <SheetHeader>
-                <SheetTitle className="text-white flex items-center justify-between">
-                  <span>Choose Tiles</span>
-                  <Button size="sm" variant="ghost" onClick={() => setShowTilesets(false)}>
-                    <X className="w-4 h-4" />
-                  </Button>
-                </SheetTitle>
-              </SheetHeader>
-              <div className="space-y-4 mt-6 overflow-auto">
-                {TILESETS.map((tileset) => (
-                  <div key={tileset.name}>
-                    <h4 className="text-sm text-slate-300 mb-3">{tileset.name}</h4>
-                    <div className="grid grid-cols-6 gap-2">
-                      {tileset.tiles.map((tile) => (
-                        <div
-                          key={tile.id}
-                          className={`
-                            aspect-square rounded border cursor-pointer transition-all
-                            ${
-                              selectedTile === tile.id
-                                ? "border-purple-400 bg-purple-500/20 ring-2 ring-purple-400"
-                                : "border-slate-700"
-                            }
-                            ${tile.color}
-                          `}
-                          onClick={() => {
-                            setSelectedTile(tile.id)
-                            setShowTilesets(false)
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </SheetContent>
-          </Sheet>
-
-          {/* Layers Sheet */}
-          <Sheet open={showLayers} onOpenChange={setShowLayers}>
-            <SheetContent side="bottom" className="bg-slate-900 border-slate-800 text-white h-[40vh]">
-              <SheetHeader>
-                <SheetTitle className="text-white flex items-center justify-between">
-                  <span>Layers</span>
-                  <Button size="sm" variant="ghost" onClick={() => setShowLayers(false)}>
-                    <X className="w-4 h-4" />
-                  </Button>
-                </SheetTitle>
-              </SheetHeader>
-              <div className="space-y-3 mt-6">
-                {layers.map((layer) => (
-                  <div
-                    key={layer.id}
-                    className={`
-                      flex items-center gap-3 p-3 rounded cursor-pointer transition-colors
-                      ${
-                        selectedLayer === layer.id
-                          ? "bg-purple-500/20 border border-purple-500/30"
-                          : "hover:bg-slate-800"
-                      }
-                    `}
-                    onClick={() => {
-                      setSelectedLayer(layer.id)
-                      setShowLayers(false)
-                    }}
-                  >
-                    <div className={`w-4 h-4 rounded ${layer.color}`} />
-                    <span className="text-sm flex-1">{layer.name}</span>
-                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0">
-                      {layer.visible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </SheetContent>
-          </Sheet>
-
-          {/* Properties Sheet */}
-          <Sheet open={showProperties} onOpenChange={setShowProperties}>
-            <SheetContent side="bottom" className="bg-slate-900 border-slate-800 text-white h-[50vh]">
-              <SheetHeader>
-                <SheetTitle className="text-white flex items-center justify-between">
-                  <span>Properties</span>
-                  <Button size="sm" variant="ghost" onClick={() => setShowProperties(false)}>
-                    <X className="w-4 h-4" />
-                  </Button>
-                </SheetTitle>
-              </SheetHeader>
-              <div className="mt-6">
-                {selectedCell ? (
-                  <div className="space-y-4">
-                    <div>
-                      <Label className="text-sm text-slate-400">Position</Label>
-                      <Input
-                        value={`${selectedCell.x}, ${selectedCell.y}`}
-                        className="bg-slate-800 border-slate-700 text-white mt-2"
-                        readOnly
-                      />
-                    </div>
-
-                    <div>
-                      <Label className="text-sm text-slate-400">Tile Type</Label>
-                      <Input
-                        value={`${selectedCell.tile}_${selectedCell.tileId}`}
-                        className="bg-slate-800 border-slate-700 text-white mt-2"
-                        readOnly
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm text-slate-400">Collision</Label>
-                      <Switch
-                        checked={selectedCell.collision || false}
-                        onCheckedChange={(checked) =>
-                          updateCell(selectedCell.x, selectedCell.y, { collision: checked })
-                        }
-                      />
-                    </div>
-
-                    {selectedCell.teleport && (
-                      <div>
-                        <Label className="text-sm text-slate-400">Exit URL</Label>
-                        <Input
-                          value={selectedCell.exitUrl || ""}
-                          onChange={(e) => updateCell(selectedCell.x, selectedCell.y, { exitUrl: e.target.value })}
-                          placeholder="https://example.com/map2"
-                          className="bg-slate-800 border-slate-700 text-white mt-2"
-                        />
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="text-center text-slate-400 py-8">Select a tile to view properties</div>
-                )}
-              </div>
-            </SheetContent>
-          </Sheet>
-        </>
-      )}
-
-      {/* AI Dialog */}
-      {showAiDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <Card className="bg-slate-800 border-slate-700 w-full max-w-md">
-            <CardContent className="p-6">
-              <h3 className="text-lg font-semibold mb-4">AI Map Generation</h3>
-              <div className="space-y-4">
-                <div>
-                  <Label className="text-sm text-slate-300">Describe your world</Label>
-                  <Textarea
-                    value={aiPrompt}
-                    onChange={(e) => setAiPrompt(e.target.value)}
-                    placeholder="A mystical forest with a hidden cave and a small lake..."
-                    className="bg-slate-900 border-slate-700 text-white mt-2"
-                    rows={3}
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <Button onClick={handleAiGenerate} className="bg-purple-600 hover:bg-purple-700 flex-1">
-                    <Sparkles className="w-4 h-4 mr-2" />
-                    Generate
-                  </Button>
-                  <Button variant="outline" onClick={() => setShowAiDialog(false)}>
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {/* Status Bar - Desktop Only */}
-      {!isMobile && (
-        <div className="bg-slate-900 border-t border-slate-800 px-4 py-2 flex items-center justify-between text-xs text-slate-400">
-          <div className="flex items-center gap-4">
-            <span>Tool: {tools.find((t) => t.id === selectedTool)?.name}</span>
-            <span>Layer: {selectedLayer}</span>
-            {selectedCell && (
-              <span>
-                Selected: {selectedCell.x}, {selectedCell.y}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-4">
-            <span>
-              {MAP_WIDTH}×{MAP_HEIGHT} tiles
-            </span>
-            <span>Last saved: {lastSaved.toLocaleTimeString()}</span>
-            <div className="flex items-center gap-1">
-              <div className={`w-2 h-2 rounded-full ${isAuthenticated ? "bg-green-400" : "bg-blue-400"}`} />
-              <span>{isAuthenticated ? "Synced with GitHub" : "Saved on your device"}</span>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ── Bottom status bar ─────────────────────────────────────────────── */}
+      <div className="bg-slate-900 border-t border-slate-800 px-4 py-1.5 flex items-center gap-4 text-xs text-slate-500">
+        <span className="flex items-center gap-1">
+          <Layers className="w-3 h-3" /> {cols}×{rows} tiles · {TILE}px grid
+        </span>
+        <span className="text-slate-600">|</span>
+        <span>{Math.round(scale * 100)}% zoom</span>
+        <span className="text-slate-600">|</span>
+        <span className="text-red-400">{collisionCount} collisions</span>
+        <span className="text-slate-600">|</span>
+        <span className={map.spawn ? "text-green-400" : ""}>spawn: {map.spawn ? `${map.spawn.x},${map.spawn.y}` : "not set"}</span>
+        <span className="text-slate-600">|</span>
+        <span className="text-purple-400">{exitCount} exits</span>
+      </div>
     </div>
   )
 }
